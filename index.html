@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>시가 타임 — 같이 쉬는 한 모금</title>
+<meta name="description" content="회사원들을 위한 가상 담배 타임. 익명으로 한마디 내뱉으면 연기처럼 사라져요.">
+<meta name="theme-color" content="#07080a">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Dodum&family=IBM+Plex+Sans+KR:wght@300;400;500&display=swap">
+<style>
+/* 1인칭 시점 단일 화면: 캔버스 전체 + 위·아래 얇은 UI 띠 */
+:root{
+  --bg:#07080a; --fg:#dcd8d0; --dim:#77726a; --line:rgba(220,216,208,.16);
+  --ember:#ff7a2e; --panel:rgba(14,15,17,.86);
+  --font-ui:'IBM Plex Sans KR',system-ui,-apple-system,'Apple SD Gothic Neo',sans-serif;
+  --font-smoke:'Gowun Dodum','IBM Plex Sans KR','Apple SD Gothic Neo',sans-serif;
+  color-scheme:dark;
+}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);overflow:hidden;overscroll-behavior:none;font-family:var(--font-ui);-webkit-user-select:none;user-select:none}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:pointer}
+.top{position:fixed;top:0;left:0;right:0;z-index:3;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;
+  padding-top:calc(14px + env(safe-area-inset-top,0px));padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));pointer-events:none;font-size:12px;color:var(--dim)}
+.top b{color:var(--fg);font-weight:500}
+.me{display:flex;flex-direction:column;gap:4px}
+.me button{pointer-events:auto;background:none;border:0;padding:0;color:var(--dim);font:inherit;text-align:left;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.clock{text-align:right;display:flex;flex-direction:column;gap:4px}
+.clock .t{font-size:28px;color:var(--fg);font-weight:300;font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.hint{position:fixed;left:0;right:0;bottom:calc(92px + env(safe-area-inset-bottom,0px));z-index:3;text-align:center;font-size:13px;color:var(--dim);pointer-events:none;transition:opacity .6s;padding-inline:16px}
+.bar{position:fixed;left:0;right:0;bottom:0;z-index:3;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  background:linear-gradient(to top,var(--bg) 40%,transparent)}
+.bar form{max-width:480px;margin:0 auto;display:flex;gap:8px;align-items:center;padding-top:28px}
+.bar input{flex:1;min-width:0;background:transparent;border:0;border-bottom:1px solid var(--line);color:var(--fg);font:16px var(--font-smoke);padding:10px 2px;outline:none}
+.bar input::placeholder{color:#4d4943}
+.bar input:focus{border-bottom-color:var(--dim)}
+.btn{background:none;border:1px solid var(--line);color:var(--fg);font:13px var(--font-ui);border-radius:999px;padding:8px 14px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--dim)}
+.btn:focus-visible,.bar input:focus-visible,.me button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
+.end{position:fixed;inset:0;z-index:5;display:flex;align-items:center;justify-content:center;background:rgba(7,8,10,.72);padding-inline:16px}
+.end .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px 26px;max-width:320px;width:100%;text-align:center;display:flex;flex-direction:column;gap:10px}
+.end h2{margin:0;font:22px var(--font-smoke);font-weight:400}
+.end p{margin:0;color:var(--dim);font-size:13px;line-height:1.6}
+.end .btn{margin-top:10px;align-self:center;border-color:var(--ember)}
+</style>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+</body>
+</html>
+</head>
+<body>
+
+<canvas id="c" aria-label="담배를 꾹 눌러 피우는 화면"></canvas>
+
+<div class="top">
+  <div class="me">
+    <span>나 · <b id="nick">졸린 수달</b></span>
+    <button id="renick" type="button">이름 바꾸기</button>
+    <span id="online">연결 중…</span>
+  </div>
+  <div class="clock">
+    <span class="t" id="time">0:00</span>
+    <span id="count">오늘 첫 번째 쉬는 시간</span>
+  </div>
+</div>
+
+<div class="hint" id="hint">화면을 꾹 눌러 불 붙이기</div>
+
+<div class="bar">
+  <form id="f" autocomplete="off">
+    <input id="msg" type="text" maxlength="50" placeholder="한숨처럼 내뱉기…" enterkeyhint="send" aria-label="내뱉을 말">
+    <button class="btn" id="flick" type="button">재 털기</button>
+  </form>
+</div>
+
+<div class="end" id="end" hidden>
+  <div class="card">
+    <h2>한 개비 끝</h2>
+    <p id="endtxt"></p>
+    <button class="btn" id="again" type="button">한 개비 더</button>
+  </div>
+</div>
+
+<script>
+(() => {
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let W, H, U;
+function resize(){
+  const d = Math.min(2, devicePixelRatio || 1);
+  W = innerWidth; H = innerHeight; U = Math.min(W, H * 0.78);
+  cv.width = W * d; cv.height = H * d; ctx.setTransform(d,0,0,d,0,0);
+}
+addEventListener('resize', resize); resize();
+
+/* ---------- 닉네임 ---------- */
+const ADJ = ['졸린','느긋한','노곤한','멍한','수줍은','고요한','퇴근하고픈','담백한','축축한','나른한','심드렁한','말랑한'];
+const ANI = ['수달','너구리','두루미','해파리','고슴도치','문어','박쥐','도롱뇽','오소리','청설모','알락꼬리','펠리컨'];
+const pick = a => a[(Math.random()*a.length)|0];
+const mkNick = () => pick(ADJ) + ' ' + pick(ANI);
+let myNick = mkNick();
+const nickEl = document.getElementById('nick'); nickEl.textContent = myNick;
+document.getElementById('renick').onclick = () => { myNick = mkNick(); nickEl.textContent = myNick; };
+
+/* ---------- 연기 텍스처 ---------- */
+function makePuff(){
+  const s = 128, c = document.createElement('canvas'); c.width = c.height = s;
+  const g = c.getContext('2d');
+  for (let i = 0; i < 16; i++){
+    const x = s/2 + (Math.random()-.5)*s*.38, y = s/2 + (Math.random()-.5)*s*.38, r = s*(.14 + Math.random()*.24);
+    const gr = g.createRadialGradient(x,y,0,x,y,r);
+    gr.addColorStop(0,'rgba(232,232,228,.20)'); gr.addColorStop(1,'rgba(232,232,228,0)');
+    g.fillStyle = gr; g.beginPath(); g.arc(x,y,r,0,7); g.fill();
+  }
+  return c;
+}
+const PUFF = [makePuff(), makePuff(), makePuff(), makePuff()];
+const P = [], D = [], MSG = [];
+const MAXP = RM ? 260 : 900;
+function puff(x, y, o){
+  if (P.length > MAXP) P.shift();
+  P.push({x, y, vx:o.vx||0, vy:o.vy||-.5, s:o.s||6, gs:o.gs||.2, a:o.a||.5, life:0, max:o.max||300,
+    rot:Math.random()*6.28, vr:(Math.random()-.5)*.012, seed:Math.random()*100, img:PUFF[(Math.random()*4)|0]});
+}
+
+/* ---------- 담배 상태 ---------- */
+const FILTER = .27, MINTIP = .30;
+let lit = false, burn = 0, ash = 0, inhale = 0, holding = false, holdStart = 0, lightProg = 0;
+let smoked = 0, finished = false, lastTap = 0, flash = 0;
+
+function geo(t){
+  const e = inhale*inhale*(3-2*inhale), cx = W/2, sway = Math.sin(t*.0009)*3;
+  const L = (a,b) => a + (b-a)*e;
+  return {
+    Tx: L(cx - .20*U, cx - .02*U) + sway, Ty: L(H*.50, H*.70) + sway*.6,
+    Fx: L(cx + .30*U, cx + .07*U), Fy: L(H + .10*U, H + .36*U),
+    wF: L(.115*U, .21*U), wT: L(.062*U, .078*U)
+  };
+}
+const tipU = () => 1 - burn*(1 - MINTIP);
+
+/* ---------- 말 → 연기 글자 ---------- */
+function say(nick, text, sample){
+  ctx.font = '17px ' + getComputedStyle(document.documentElement).getPropertyValue('--font-smoke');
+  const chars = [...text], widths = chars.map(c => ctx.measureText(c).width);
+  const total = widths.reduce((a,b)=>a+b,0);
+  const ox = W/2 + (sample ? (Math.random()-.5)*U*.5 : 0), oy = H*(sample ? .62 + Math.random()*.08 : .74);
+  let x = ox - total/2;
+  MSG.push({nick, sample, x:ox, y:oy, life:0, max:600,
+    chars: chars.map((c,i) => { const o = {c, x:x+widths[i]/2, y:oy, seed:Math.random()*10, sp:(Math.random()-.5)}; x += widths[i]; return o; })});
+  if (MSG.length > 14) MSG.shift();
+  if (!sample) exhaleBurst(14, ox);
+}
+function exhaleBurst(n, x0){
+  x0 = x0 ?? W/2;
+  for (let i = 0; i < n; i++){
+    puff(x0 + (Math.random()-.5)*70, H + 30, {vx:(Math.random()-.5)*2.2, vy:-(3 + Math.random()*3.2),
+      s:26 + Math.random()*20, gs:1.1 + Math.random()*.9, a:.32 + Math.random()*.18, max:120 + Math.random()*80});
+  }
+}
+
+/* ---------- 입력 ---------- */
+function startHold(){
+  if (finished) return;
+  holding = true; holdStart = performance.now();
+  const now = holdStart;
+  if (now - lastTap < 320 && lit) flick();
+  lastTap = now;
+}
+function endHold(){
+  if (!holding) return;
+  holding = false;
+  const held = performance.now() - holdStart;
+  if (lit && held > 260) exhaleBurst(Math.min(70, Math.round(held/38)));
+}
+cv.addEventListener('pointerdown', e => { e.preventDefault(); cv.setPointerCapture(e.pointerId); startHold(); });
+cv.addEventListener('pointerup', endHold);
+cv.addEventListener('pointercancel', endHold);
+addEventListener('keydown', e => { if (e.code === 'Space' && document.activeElement !== msgEl && !e.repeat){ e.preventDefault(); startHold(); } });
+addEventListener('keyup', e => { if (e.code === 'Space' && document.activeElement !== msgEl) endHold(); });
+
+const msgEl = document.getElementById('msg');
+document.getElementById('f').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = clean(msgEl.value.trim().slice(0,50)); if (!v) return;
+  const now = Date.now();
+  if (now - lastSend < 1500){ msgEl.placeholder = '천천히… 한 모금씩'; return; }
+  lastSend = now;
+  say(myNick, v, false); msgEl.value = ''; msgEl.placeholder = '한숨처럼 내뱉기…';
+  send('msg', {n: myNick, t: v});
+});
+document.getElementById('flick').onclick = () => flick();
+
+function flick(){
+  if (ash < .01) return;
+  const g = geo(performance.now()), tu = tipU();
+  const len = Math.hypot(g.Tx-g.Fx, g.Ty-g.Fy), dx = (g.Tx-g.Fx)/len, dy = (g.Ty-g.Fy)/len;
+  const n = Math.round(ash*260);
+  for (let i = 0; i < n; i++){
+    const u = tu + Math.random()*ash;
+    D.push({x:g.Fx+dx*u*len, y:g.Fy+dy*u*len + (Math.random()-.5)*8, vx:(Math.random()-.5)*2.5, vy:Math.random()*-1.5,
+      r:1 + Math.random()*3, life:0, max:70 + Math.random()*40, c:Math.random()<.15 ? '#8a3a1a' : (Math.random()<.5 ? '#9a958d' : '#5f5b55')});
+  }
+  ash = 0;
+}
+
+/* ---------- 실시간 중계 (저장 없음, 받은 순간 화면에만) ---------- */
+const BROKER = 'wss://broker.emqx.io:8084/mqtt';
+const TOPIC = 'sigar-time/gustjr/lobby';
+const ID = Math.random().toString(36).slice(2, 10);
+const BAD = ['씨발','시발','ㅅㅂ','ㅆㅂ','병신','ㅂㅅ','좆','개새끼','지랄','fuck','shit'];
+function clean(t){
+  let o = t.replace(/[\u0000-\u001f]/g, '');
+  for (const b of BAD) o = o.split(b).join('*'.repeat(b.length));
+  return o.trim();
+}
+let lastSend = 0, client = null;
+const peers = new Map(), lastFrom = new Map();
+const onlineEl = document.getElementById('online');
+function updOnline(){
+  const now = Date.now();
+  for (const [k, v] of peers) if (now - v > 50000) peers.delete(k);
+  onlineEl.textContent = client && client.connected ? '지금 ' + (peers.size + 1) + '명 쉬는 중' : '연결 중…';
+}
+function send(kind, data){
+  if (client && client.connected) client.publish(TOPIC + '/' + kind, JSON.stringify(Object.assign({id: ID}, data)));
+}
+try {
+  client = mqtt.connect(BROKER, {clientId: 'sig_' + ID, clean: true, reconnectPeriod: 3000, connectTimeout: 10000});
+  client.on('connect', () => { client.subscribe(TOPIC + '/#'); send('hi', {}); updOnline(); });
+  client.on('close', updOnline);
+  client.on('offline', updOnline);
+  client.on('message', (topic, buf) => {
+    let d; try { d = JSON.parse(buf.toString()); } catch (e) { return; }
+    if (!d || typeof d.id !== 'string' || d.id === ID) return;
+    peers.set(d.id, Date.now());
+    if (topic.endsWith('/msg') && typeof d.t === 'string' && typeof d.n === 'string'){
+      const now = Date.now();
+      if (now - (lastFrom.get(d.id) || 0) < 1000) return; // 도배 차단
+      lastFrom.set(d.id, now);
+      const t = clean(d.t.slice(0, 50)), n = d.n.slice(0, 16);
+      if (t && !document.hidden) say(n, t, true);
+    }
+    updOnline();
+  });
+} catch (e) { onlineEl.textContent = '연결 실패 · 새로고침해 주세요'; }
+setInterval(() => send('hi', {}), 20000);
+setInterval(updOnline, 5000);
+
+/* ---------- 카운트 ---------- */
+const KEY = 'hanmogeum-' + new Date().toISOString().slice(0,10);
+let today = 0; try { today = +localStorage.getItem(KEY) || 0; } catch(e){}
+const NUM = ['첫','두','세','네','다섯','여섯','일곱','여덟','아홉','열'];
+const countEl = document.getElementById('count');
+const showCount = () => countEl.textContent = '오늘 ' + (NUM[today] || (today+1)) + ' 번째 쉬는 시간';
+showCount();
+const fmt = s => Math.floor(s/60) + ':' + String(Math.floor(s%60)).padStart(2,'0');
+
+function finish(){
+  finished = true; holding = false;
+  exhaleBurst(30);
+  today++; try { localStorage.setItem(KEY, today); } catch(e){}
+  document.getElementById('endtxt').textContent = fmt(smoked) + ' 동안 쉬었어요. 진짜 담배 대신 오늘 ' + today + '번째 한 모금.';
+  document.getElementById('end').hidden = false;
+}
+document.getElementById('again').onclick = () => {
+  lit = false; burn = 0; ash = 0; smoked = 0; lightProg = 0; finished = false;
+  document.getElementById('end').hidden = true; showCount();
+  hintEl.textContent = '화면을 꾹 눌러 불 붙이기'; hintEl.style.opacity = 1;
+};
+const hintEl = document.getElementById('hint'), timeEl = document.getElementById('time');
+
+/* ---------- 그리기 ---------- */
+function drawCig(t){
+  const g = geo(t), len = Math.hypot(g.Tx-g.Fx, g.Ty-g.Fy), ang = Math.atan2(g.Ty-g.Fy, g.Tx-g.Fx);
+  const w = u => g.wF + (g.wT - g.wF)*u, tu = tipU();
+  ctx.save(); ctx.translate(g.Fx, g.Fy); ctx.rotate(ang);
+  const quad = (u0,u1) => { ctx.beginPath(); ctx.moveTo(u0*len,-w(u0)/2); ctx.lineTo(u1*len,-w(u1)/2); ctx.lineTo(u1*len,w(u1)/2); ctx.lineTo(u0*len,w(u0)/2); ctx.closePath(); };
+  const cyl = (u0,u1,stops) => { const wm = w((u0+u1)/2), gr = ctx.createLinearGradient(0,-wm/2,0,wm/2); stops.forEach(s=>gr.addColorStop(s[0],s[1])); return gr; };
+
+  // 필터 (코르크)
+  quad(0, FILTER);
+  ctx.fillStyle = cyl(0,FILTER,[[0,'#5a3418'],[.28,'#c98a4c'],[.48,'#e3a866'],[.78,'#9a5f2e'],[1,'#3d220f']]); ctx.fill();
+  ctx.save(); ctx.clip(); ctx.globalAlpha = .35; ctx.fillStyle = '#6b3a17';
+  for (let i = 0; i < 90; i++){ const u = ((i*0.618)%1)*FILTER, v = (((i*0.371)%1)-.5)*w(u)*.9; ctx.beginPath(); ctx.arc(u*len, v, 1 + (i%3)*.6, 0, 7); ctx.fill(); }
+  ctx.restore();
+  // 금색 띠
+  quad(FILTER-.012, FILTER); ctx.fillStyle = cyl(FILTER-.012,FILTER,[[0,'#5c4710'],[.45,'#e9cf7a'],[1,'#4a380a']]); ctx.fill();
+
+  // 종이
+  quad(FILTER, tu);
+  ctx.fillStyle = cyl(FILTER,tu,[[0,'#6f6c66'],[.22,'#e6e3dc'],[.44,'#fbfaf6'],[.74,'#bdb9b1'],[1,'#4c4945']]); ctx.fill();
+  // 타들어간 그을음
+  const sg = ctx.createLinearGradient((tu-.05)*len,0,tu*len,0);
+  sg.addColorStop(0,'rgba(60,40,25,0)'); sg.addColorStop(.7,'rgba(70,45,25,.45)'); sg.addColorStop(1,'rgba(30,18,10,.9)');
+  quad(Math.max(FILTER,tu-.05), tu); ctx.fillStyle = sg; ctx.fill();
+
+  if (!lit){
+    ctx.beginPath(); ctx.ellipse(tu*len, 0, w(tu)*.16, w(tu)/2, 0, 0, 7);
+    ctx.fillStyle = '#8a5f30'; ctx.fill();
+    ctx.globalAlpha = .5; ctx.fillStyle = '#3d2410';
+    for (let i = 0; i < 18; i++){ ctx.beginPath(); ctx.arc(tu*len + ((i*0.37)%1-.5)*w(tu)*.2, ((i*0.618)%1-.5)*w(tu)*.85, 1.2, 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    if (lightProg > 0){ // 라이터 불꽃
+      const fx = tu*len + 6, fl = 18 + Math.sin(t*.05)*3;
+      ctx.globalCompositeOperation = 'lighter';
+      const fg = ctx.createRadialGradient(fx,0,0,fx,0,fl*2); fg.addColorStop(0,'rgba(255,220,140,'+(.9*lightProg)+')'); fg.addColorStop(1,'rgba(255,120,30,0)');
+      ctx.fillStyle = fg; ctx.beginPath(); ctx.arc(fx,0,fl*2,0,7); ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+    }
+  } else {
+    // 재
+    const ae = Math.min(1, tu + ash);
+    if (ash > .002){
+      quad(tu, ae);
+      ctx.fillStyle = cyl(tu,ae,[[0,'#2c2926'],[.25,'#7b766e'],[.48,'#bdb7ad'],[.72,'#6d6861'],[1,'#25221f']]); ctx.fill();
+      ctx.strokeStyle = 'rgba(30,28,26,.55)'; ctx.lineWidth = 1;
+      for (let i = 1; i < 6; i++){ const u = tu + ash*i/6; ctx.beginPath(); ctx.moveTo(u*len,-w(u)/2); ctx.quadraticCurveTo(u*len+3,0,u*len,w(u)/2); ctx.stroke(); }
+      ctx.beginPath(); ctx.ellipse(ae*len, 0, w(ae)*.14, w(ae)/2, 0, 0, 7); ctx.fillStyle = '#8f8a82'; ctx.fill();
+    }
+    // 불씨
+    const fl = .82 + Math.sin(t*.031)*.08 + Math.sin(t*.077)*.06, heat = Math.min(1, .35 + inhale*.9) * fl;
+    quad(tu-.008, tu+.012);
+    ctx.fillStyle = cyl(tu,tu,[[0,'#3a0d02'],[.3,'rgb(255,'+(90+heat*90|0)+',30)'],[.5,'rgb(255,'+(150+heat*90|0)+','+(60+heat*90|0)+')'],[.7,'rgb(230,'+(70+heat*60|0)+',20)'],[1,'#2a0a02']]);
+    ctx.fill();
+    ctx.globalCompositeOperation = 'lighter';
+    const R = w(tu)*(1.2 + heat*1.8), eg = ctx.createRadialGradient(tu*len,0,0,tu*len,0,R);
+    eg.addColorStop(0,'rgba(255,140,50,'+(.55*heat)+')'); eg.addColorStop(.4,'rgba(255,80,20,'+(.22*heat)+')'); eg.addColorStop(1,'rgba(255,60,10,0)');
+    ctx.fillStyle = eg; ctx.beginPath(); ctx.arc(tu*len,0,R,0,7); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  ctx.restore();
+
+  // 따뜻한 반사광
+  if (lit){
+    const ex = g.Fx + (g.Tx-g.Fx)*tu, ey = g.Fy + (g.Ty-g.Fy)*tu, r = U*(.5 + inhale*.4);
+    ctx.globalCompositeOperation = 'lighter';
+    const lg = ctx.createRadialGradient(ex,ey,0,ex,ey,r); lg.addColorStop(0,'rgba(255,110,40,'+(.05 + inhale*.07)+')'); lg.addColorStop(1,'rgba(255,90,30,0)');
+    ctx.fillStyle = lg; ctx.fillRect(0,0,W,H);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  return {ex: g.Fx + (g.Tx-g.Fx)*tu, ey: g.Fy + (g.Ty-g.Fy)*tu};
+}
+
+function drawSmoke(t, dt){
+  for (let i = P.length-1; i >= 0; i--){
+    const p = P[i]; p.life += dt;
+    if (p.life >= p.max){ P.splice(i,1); continue; }
+    const k = p.life/p.max;
+    const n = Math.sin(p.y*.011 + t*.0006 + p.seed)*.3 + Math.sin(p.x*.008 - t*.0004 + p.seed*.5)*.2;
+    p.vx += n*.022*dt; p.vx *= Math.pow(.993, dt); p.vy = p.vy*Math.pow(.992, dt) - .004*dt;
+    p.x += p.vx*dt; p.y += p.vy*dt; p.s += p.gs*dt; p.rot += p.vr*dt;
+    const a = p.a * Math.min(1, k*8) * Math.pow(1-k, 1.6);
+    if (a < .003) continue;
+    ctx.globalAlpha = a; ctx.save(); ctx.translate(p.x,p.y); ctx.rotate(p.rot); ctx.drawImage(p.img,-p.s,-p.s,p.s*2,p.s*2); ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawDebris(dt){
+  for (let i = D.length-1; i >= 0; i--){
+    const d = D[i]; d.life += dt; if (d.life > d.max){ D.splice(i,1); continue; }
+    d.vy += .14*dt; d.vx *= .99; d.x += d.vx*dt; d.y += d.vy*dt;
+    ctx.globalAlpha = 1 - d.life/d.max; ctx.fillStyle = d.c; ctx.fillRect(d.x, d.y, d.r, d.r*.8);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawMessages(t, dt){
+  const ff = getComputedStyle(document.documentElement).getPropertyValue('--font-smoke');
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (let i = MSG.length-1; i >= 0; i--){
+    const m = MSG[i]; m.life += dt; if (m.life > m.max){ MSG.splice(i,1); continue; }
+    const k = m.life/m.max, rise = -m.life*.55, spread = Math.max(0, k-.35)/.65;
+    const base = (m.sample ? .8 : .9) * Math.min(1, k*10) * Math.pow(1-k, 1.3);
+    ctx.font = '12px ' + ff; ctx.fillStyle = 'rgba(160,154,145,' + base*.8 + ')';
+    ctx.fillText(m.nick, m.x + Math.sin(t*.001+m.life*.01)*6*spread, m.y + rise - 22 - spread*14);
+    ctx.font = '17px ' + ff;
+    for (const c of m.chars){
+      const wob = Math.sin(m.life*.022 + c.seed)*(3 + spread*22), lift = Math.cos(m.life*.017 + c.seed)*spread*18;
+      const x = c.x + wob + c.sp*spread*spread*90, y = c.y + rise + lift - spread*spread*40*Math.abs(c.sp);
+      const a = base * (1 - spread*.4*Math.abs(c.sp*2));
+      ctx.save(); ctx.translate(x, y); ctx.rotate(c.sp*spread*.9); ctx.scale(1 + spread*.6, 1 + spread*.6);
+      ctx.shadowColor = 'rgba(220,216,208,' + a*.8 + ')'; ctx.shadowBlur = 2 + spread*14;
+      ctx.fillStyle = 'rgba(226,222,214,' + a + ')'; ctx.fillText(c.c, 0, 0);
+      ctx.restore();
+    }
+  }
+  ctx.shadowBlur = 0;
+}
+
+/* ---------- 루프 ---------- */
+let last = performance.now(), emitAcc = 0;
+function frame(t){
+  const dt = Math.min(3, (t - last)/16.67), ds = (t - last)/1000; last = t;
+  inhale += ((holding && lit && !finished ? 1 : 0) - inhale) * Math.min(1, .06*dt);
+
+  if (!lit && holding && !finished){
+    lightProg = Math.min(1, lightProg + ds*1.4);
+    if (lightProg >= 1){ lit = true; lightProg = 0; hintEl.textContent = '꾹 누르면 들이마시고, 떼면 내뱉어요 · 두 번 톡 = 재 털기'; setTimeout(()=>hintEl.style.opacity=0, 7000); }
+  } else if (!lit) lightProg = Math.max(0, lightProg - ds*2);
+
+  if (lit && !finished){
+    smoked += ds; timeEl.textContent = fmt(smoked);
+    const rate = holding ? 1/42 : 1/330;
+    burn = Math.min(1, burn + rate*ds); ash += rate*ds*(1-MINTIP)*.92;
+    if (ash > .13 && Math.random() < .004*dt) flick();
+    if (burn >= 1) finish();
+  }
+
+
+  ctx.fillStyle = '#07080a'; ctx.fillRect(0,0,W,H);
+  const vg = ctx.createRadialGradient(W/2,H*.55,U*.2,W/2,H*.55,Math.max(W,H)*.75);
+  vg.addColorStop(0,'#111214'); vg.addColorStop(1,'#050506'); ctx.fillStyle = vg; ctx.fillRect(0,0,W,H);
+
+  drawSmoke(t, dt);
+  const tip = drawCig(t);
+  drawDebris(dt);
+  drawMessages(t, dt);
+
+  if (lit && !finished){
+    emitAcc += dt * (RM ? .4 : 1);
+    while (emitAcc >= 1){ emitAcc--; puff(tip.ex + (Math.random()-.5)*3, tip.ey - 4, {vx:(Math.random()-.5)*.3, vy:-.7 - inhale*.4, s:3 + Math.random()*2, gs:.13, a:.32, max:240 + Math.random()*80}); }
+  }
+
+  // 들이마실 때 시야 좁아짐
+  if (inhale > .01){
+    const iv = ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*.25,W/2,H/2,Math.max(W,H)*.7);
+    iv.addColorStop(0,'rgba(0,0,0,0)'); iv.addColorStop(1,'rgba(0,0,0,'+(inhale*.55)+')');
+    ctx.fillStyle = iv; ctx.fillRect(0,0,W,H);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
