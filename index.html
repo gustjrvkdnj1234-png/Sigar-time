@@ -125,9 +125,19 @@ function puff(x, y, o){
 const FILTER = .27, MINTIP = .30;
 let lit = false, burn = 0, ash = 0, inhale = 0, holding = false, holdStart = 0, lightProg = 0;
 let smoked = 0, finished = false, lastTap = 0, flash = 0;
-let taps = [], knocks = [];
+let taps = [], knocks = [], flickStart = 0;
 const C = [];
-/* 턱턱: 손목으로 두 번 치는 감쇠 진동 (아래로 꺾였다 튕겨 돌아옴) */
+/* 털기 자세: 재떨이 쪽으로 기울임(0~230ms) → 검지로 필터 두 번 톡 → 제자리(560~950ms) */
+const easeOut = x => 1 - Math.pow(1 - x, 3), easeIO = x => x < .5 ? 4*x*x*x : 1 - Math.pow(-2*x + 2, 3)/2;
+function flickPose(t){
+  if (!flickStart) return 0;
+  const d = t - flickStart;
+  if (d < 0 || d > 950) return 0;
+  if (d < 230) return easeOut(d/230);
+  if (d < 560) return 1;
+  return 1 - easeIO((d - 560)/390);
+}
+/* 턱턱: 필터를 칠 때마다 끝이 아래로 휙 꺾였다 튕겨 돌아오는 감쇠 진동 */
 function tapOffset(t){
   let o = 0;
   for (const ti of taps){ const d = t - ti; if (d > 0 && d < 520) o += .055*U * Math.exp(-d/75) * Math.sin(d/30); }
@@ -137,10 +147,18 @@ function tapOffset(t){
 function geo(t){
   const e = inhale*inhale*(3-2*inhale), cx = W/2, sway = Math.sin(t*.0009)*3;
   const L = (a,b) => a + (b-a)*e;
-  const o = tapOffset(t);
+  const o = tapOffset(t), p = flickPose(t);
+  let Tx = L(cx - .20*U, cx - .02*U) + sway, Ty = L(H*.50, H*.70) + sway*.6;
+  let Fx = L(cx + .30*U, cx + .07*U), Fy = L(H + .10*U, H + .36*U);
+  // 손가락이 쥔 지점(필터 쪽)을 축으로 끝을 아래로 기울이고, 손을 재떨이 쪽으로 살짝 옮김
+  const px = Fx + (Tx - Fx)*.14, py = Fy + (Ty - Fy)*.14;
+  const th = -p*.46 - o/U*1.1, cs = Math.cos(th), sn = Math.sin(th);
+  const rot = (x, y) => [px + (x-px)*cs - (y-py)*sn, py + (x-px)*sn + (y-py)*cs];
+  [Tx, Ty] = rot(Tx, Ty); [Fx, Fy] = rot(Fx, Fy);
+  const mx = -p*.07*U, my = p*.06*U;
+  Tx += mx + o*.12; Ty += my + o*.55; Fx += mx; Fy += my - o*.18;
   return {
-    Tx: L(cx - .20*U, cx - .02*U) + sway + o*.18, Ty: L(H*.50, H*.70) + sway*.6 + o,
-    Fx: L(cx + .30*U, cx + .07*U), Fy: L(H + .10*U, H + .36*U) + o*.22,
+    Tx, Ty, Fx, Fy,
     wF: L(.115*U, .21*U), wT: L(.062*U, .078*U)
   };
 }
@@ -218,11 +236,12 @@ function thump(at){
 function flick(){
   if (!lit || finished) return;
   const now = performance.now();
-  if (taps.length && now - taps[taps.length-1] < 450) return;
-  taps = [now, now + 175];
-  if (ash > .008){ knocks.push({at: now + 40, frac: .65}); knocks.push({at: now + 215, frac: 1}); }
-  thump(0); thump(.175);
-  try { navigator.vibrate && navigator.vibrate([16, 160, 16]); } catch (e) {}
+  if (flickStart && now - flickStart < 950) return;
+  flickStart = now;
+  taps = [now + 230, now + 410];
+  if (ash > .008){ knocks.push({at: now + 270, frac: .65}); knocks.push({at: now + 450, frac: 1}); }
+  thump(.23); thump(.41);
+  setTimeout(() => { try { navigator.vibrate && navigator.vibrate([16, 165, 16]); } catch (e) {} }, 230);
 }
 /* 재 덩어리가 끝에서부터 떨어져 나감 */
 function knock(frac, gentle){
@@ -339,7 +358,7 @@ function finish(){
   document.getElementById('end').hidden = false;
 }
 document.getElementById('again').onclick = () => {
-  lit = false; burn = 0; ash = 0; taps = []; knocks = []; C.length = 0; smoked = 0; lightProg = 0; finished = false;
+  lit = false; burn = 0; ash = 0; taps = []; knocks = []; flickStart = 0; C.length = 0; smoked = 0; lightProg = 0; finished = false;
   document.getElementById('end').hidden = true; showCount();
   hintEl.textContent = '화면을 꾹 눌러 불 붙이기'; hintEl.style.opacity = 1;
 };
@@ -488,6 +507,7 @@ function frame(t){
 
   for (let i = knocks.length-1; i >= 0; i--) if (t >= knocks[i].at){ knock(knocks[i].frac, false); knocks.splice(i,1); }
   if (taps.length && t - taps[taps.length-1] > 600) taps = [];
+  if (flickStart && t - flickStart > 1000) flickStart = 0;
 
   ctx.fillStyle = '#07080a'; ctx.fillRect(0,0,W,H);
   ctx.save(); ctx.translate(0, tapOffset(t)*.07);
